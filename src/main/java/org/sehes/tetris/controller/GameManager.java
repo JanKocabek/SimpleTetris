@@ -25,49 +25,56 @@ import static org.sehes.tetris.controller.GameState.PAUSED;
 import static org.sehes.tetris.controller.GameState.PLAYING;
 import static org.sehes.tetris.controller.GameState.PREPARED;
 
-
-/**
- * The GameManager class is responsible for managing the overall game state,
- * handling user input, and coordinating the game loop. It initializes the game
- * components, starts the game loop, and provides methods for moving and
- * rotating pieces, as well as pausing and resuming the game.
- */
 public class GameManager implements InputHandler {
+
+    // =========================================================================
+    // 1. CONSTANTS
+    // =========================================================================
+    private static final int BASE_SPEED_MS = 600;
+    private static final long movementSpeed = TimeUnit.MILLISECONDS.toNanos(BASE_SPEED_MS);
+
+
+    // =========================================================================
+    // 2. INFRASTRUCTURE & SERVICES
+    // =========================================================================
+    private final StateManager<GameState> stateManager;
+    private final PieceGenerator generator;
+    private final ScoreMessenger scoreMessenger;
+    private final GameLoop gameLoop;
+    private Rendering tetrisCanvas;
+    private Runnable gameExit = () -> System.exit(0);
+    private final LockDelay lockDelay = new LockDelay();
+    // =========================================================================
+    // 3. OBSERVABLES & OBSERVERS
+    // =========================================================================
     private final Observable.Publisher<TetrominoType> spawnObservable = new ObservableImpl<>();
     private final Observable.Publisher<TetrominoType> holdObservable = new ObservableImpl<>();
     private final Observer<Long> tickObserver = this::onTickUpdate;
-    private final StateManager<GameState> stateManager;
-    private final PieceGenerator generator;
-    private final AtomicBoolean isDirty = new AtomicBoolean(false); // is full redraw needed?
-    private final ScoreMessenger scoreMessenger;
-    private Rendering tetrisCanvas; // Reference to the canvas for repainting
-    private GameBoard gameBoard; // reference to the game board for managing game logic
-    private Runnable gameExit = () -> System.exit(0);
-    private GhostType ghostType;
-    private TetrominoType holdTetromino;
+
+    // =========================================================================
+    // 4. GAME MODEL & PIECE STATE
+    // =========================================================================
+    private GameBoard gameBoard;
+    private GhostType ghostType = GhostType.FULL;
+    private TetrominoType holdTetromino = null;
     private boolean isHoldLock = false;
-    private static final int BASE_SPEED = 600;
-    //loop Variables
-    private final long movementSpeed = TimeUnit.MILLISECONDS.toNanos(BASE_SPEED);
+
+    // =========================================================================
+    // 5. TIMING, PHYSICS & RENDER STATE
+    // =========================================================================
+    private final AtomicBoolean isDirty = new AtomicBoolean(false);
     private long gravityAccumulator;
-    private final GameLoop gameLoop;
+    // =========================================================================
+    // PUBLIC INTERFACE (CONSTRUCTOR & PUBLIC METHODS)
+    // =========================================================================
 
     public GameManager(StateManager<GameState> stateManager, ScoreMessenger scoreMessenger, PieceGenerator generator, GameLoop loop) {
         this.generator = generator;
-        this.ghostType = GhostType.FULL;
         this.stateManager = stateManager;
         this.scoreMessenger = scoreMessenger;
-        this.holdTetromino = null;
         this.gameLoop = loop;
     }
 
-    public Observer<Long> tickObserver() {
-        return tickObserver;
-    }
-
-    /**
-     * initialize the GameManger by wiring the main canvas and exitGameCallBack
-     */
     public void prepareGame(Rendering canvas, Runnable exitAction) {
         if (stateManager.getState() == INIT) {
             this.tetrisCanvas = canvas;
@@ -86,9 +93,11 @@ public class GameManager implements InputHandler {
             default -> {
                 break;
             }
-
         }
+    }
 
+    public Observer<Long> tickObserver() {
+        return tickObserver;
     }
 
     public Observable<TetrominoType> spawnObservable() {
@@ -99,53 +108,9 @@ public class GameManager implements InputHandler {
         return holdObservable;
     }
 
-    private void onTickUpdate(Long elapsedTime) {
-        if (stateManager.getState() == NEW_GAME || stateManager.getState() == PLAYING) {
-            gravityUpdate(elapsedTime);
-            render();
-        }
-    }
-
-    private void gravityUpdate(Long elapsedTime) {
-        gravityAccumulator += elapsedTime;
-        while (gravityAccumulator >= movementSpeed) {
-            if (!gameBoard.tryGravityMove()) {
-                //todo: this will in future update here replaced by delayLock mechanism (soft drop) after GameLoop is made own class and Gui/swing-agnostic!
-                lockClearAndScorePiece();
-                isDirty.set(true);
-                break;//break the while loop
-            }
-            gravityAccumulator -= movementSpeed;
-        }
-    }
-
-    private BoardView getBoardView() {
-        return gameBoard.getBoardView();
-    }
-
-    private Tetromino getCurrentTetromino() {
-        return gameBoard.getCurrentTetromino();
-    }
-
-    private void gameOverInput(InputAction action) {
-        switch (action) {
-            case CONFIRM -> startGame();
-            case CANCEL -> exitGame();
-            default -> {
-                break;
-            }
-        }
-    }
-
-    private void pauseGameInput(InputAction action) {
-        switch (action) {
-            case CANCEL -> exitGame();
-            case CONFIRM -> resumeGame();
-            default -> {
-                break;
-            }
-        }
-    }
+    // =========================================================================
+    // PRIVATE METHODS: 1. INPUT ROUTING
+    // =========================================================================
 
     private void runningGameInput(InputAction action) {
         switch (action) {
@@ -165,6 +130,76 @@ public class GameManager implements InputHandler {
         }
     }
 
+    private void preparedInput(InputAction action) {
+        switch (action) {
+            case CONFIRM -> startGame();
+            case CANCEL -> exitGame();
+            default -> {
+                break;
+            }
+        }
+    }
+
+    private void pauseGameInput(InputAction action) {
+        switch (action) {
+            case CANCEL -> exitGame();
+            case CONFIRM -> resumeGame();
+            default -> {
+                break;
+            }
+        }
+    }
+
+    private void gameOverInput(InputAction action) {
+        switch (action) {
+            case CONFIRM -> startGame();
+            case CANCEL -> exitGame();
+            default -> {
+                break;
+            }
+        }
+    }
+
+    // =========================================================================
+    // PRIVATE METHODS: 2. PIECE MOVEMENT & ACTIONS
+    // =========================================================================
+
+    private void movePiece(final DirectionFlag direction) {
+        if (gameBoard.tryMovePiece(direction)) {
+            checkLockDelay();
+            render();
+        }
+    }
+
+    private void checkLockDelay() {
+        lockDelay.checkMove(getCurrentTetromino().getPositionY(), lockDelay.isOn());
+    }
+
+    private void rotatePiece(final RotationFlag rotate) {
+        if (gameBoard.tryRotatePiece(rotate)) {
+            checkLockDelay();
+            render();
+        }
+    }
+
+    private void softDrop() {
+        if (gameBoard.trySoftDrop()) {
+            scoreMessenger.notifyObservers(new SoftDropEvent(1));
+            checkLockDelay();
+            render();
+        }
+    }
+
+    private void hardDrop() {
+        final var distance = gameBoard.tryHardDrop();
+        if (distance > 0) {
+            scoreMessenger.notifyObservers(new HardDropEvent(distance));
+            render();
+        }
+        lockClearAndScorePiece();
+
+    }
+
     private void holdOrSwap() {
         if (isHoldLock) return;
 
@@ -181,87 +216,104 @@ public class GameManager implements InputHandler {
         render();
     }
 
-    private boolean trySpawnMino(TetrominoType previousHold) {
-        return gameBoard.trySetNewTetromino(previousHold);
+    private void toggleGhostPiece() {
+        ghostType = ghostType.next();
+        render();
     }
 
+    // =========================================================================
+    // PRIVATE METHODS: 3. PIECE LIFECYCLE & SOLIDIFICATION
+    // =========================================================================
+
+    private boolean trySpawnNewTetromino() {
+        final var piece = generator.getNextPiece();
+        if (trySpawnMino(piece)) {
+            spawnObservable.notify(generator.peekNext());
+            return true;
+        }
+        return false;
+    }
+
+    private boolean trySpawnMino(TetrominoType minoType) {
+        if (gameBoard.trySetNewTetromino(minoType)) {
+            lockDelay.setFor(getCurrentTetromino());
+            return true;
+        }
+        return false;
+    }
+
+
+    private boolean spawnMinoOrGameOver() {
+        if (trySpawnNewTetromino()) return true;
+        setGameOver();
+        return false;
+    }
 
     private void setHoldAndNotify(TetrominoType currentType) {
         holdTetromino = currentType;
         holdObservable.notify(holdTetromino);
     }
 
-    /**
-     * call new repainting on mainCanvas
-     */
-    private void render() {
-        tetrisCanvas.render(createGameSnapshot());
-    }
-
-    private void toggleGhostPiece() {
-        ghostType = ghostType.next();
-        render();
-    }
-
-    private void hardDrop() {
-        final var distance = gameBoard.tryHardDrop();
-        if (distance > 0) {
-            scoreMessenger.notifyObservers(new HardDropEvent(distance));
-            render();
-        }
-        lockClearAndScorePiece();
+    private void lockClearAndScorePiece() {
+        isHoldLock = false;
+        gameBoard.lockTetrominoInPlace();
+        gameBoard.clearLines();
+        final var lastAction = gameBoard.getLastAction();
+        final LockPieceEvent lockEvent = createLockEvent(lastAction.tSpin(), lastAction.linesCleared());
+        scoreMessenger.notifyObservers(lockEvent);
+        spawnMinoOrGameOver();
+        gravityAccumulator = 0;
         isDirty.set(true);
     }
 
-    private void preparedInput(InputAction action) {
-        switch (action) {
-            case CONFIRM -> startGame();
-            case CANCEL -> exitGame();
-            default -> {
+    private LockPieceEvent createLockEvent(final TSpin tSpin, int clearedLines) {
+        return new LockPieceEvent(clearedLines, tSpin);
+    }
+
+    // =========================================================================
+    // PRIVATE METHODS: 4. GAME LOOP & GRAVITY PHYSICS & LOCK DELAY
+    // =========================================================================
+
+    private void onTickUpdate(Long elapsedTime) {
+        if (stateManager.getState() == NEW_GAME || stateManager.getState() == PLAYING) {
+            gravityUpdate(elapsedTime);
+            lockDelayUpdate(elapsedTime);
+            render();
+        }
+    }
+
+    private void lockDelayUpdate(Long elapsedTime) {
+        if (lockDelay.isOn() && lockDelay.onTick(elapsedTime)) {
+            lockClearAndScorePiece();
+        }
+    }
+
+    private void gravityUpdate(Long elapsedTime) {
+        gravityAccumulator += elapsedTime;
+        while (gravityAccumulator >= movementSpeed) {
+            if (gameBoard.tryGravityMove()) {
+                gravityAccumulator -= movementSpeed;
+                lockDelay.resetLockMode();
+            } else {
+                gravityAccumulator = 0;
+                lockDelay.setLockModeOn();
+                lockDelay.onGrounded(getCurrentTetromino().getPositionY());
                 break;
             }
         }
     }
 
-    /**
-     * Try to move the current piece in the specified direction. If the move is
-     * successful, repaint the canvas to reflect the new position of the piece.
-     *
-     * @param direction The direction to move the piece (e.g., LEFT, RIGHT,
-     *                  DOWN).
-     */
-    private void movePiece(final DirectionFlag direction) {
-        if (gameBoard.tryMovePiece(direction)) {
-            render();
-        }
+
+    private void resetAccumulator() {
+        gravityAccumulator = 0;
     }
 
-    private void softDrop() {
-        if (gameBoard.trySoftDrop()) {
-            scoreMessenger.notifyObservers(new SoftDropEvent(1));
-            render();
-        }
-    }
+    // =========================================================================
+    // PRIVATE METHODS: 5. GAME LIFECYCLE & STATE CONTROL
+    // =========================================================================
 
-    /**
-     * Try to rotate the current piece in the specified direction. If the
-     * rotation is successful, repaint the canvas to reflect the new orientation
-     * of the piece.
-     *
-     * @param rotate The direction to rotate the piece (CLOCKWISE, COUN
-     */
-    private void rotatePiece(final RotationFlag rotate) {
-        if (gameBoard.tryRotatePiece(rotate)) {
-            render();
-        }
-    }
-
-    /**
-     * Starts the game by resetting the game board and starting the game loop
-     * timer. Sets the game state to PLAYING.
-     */
     private void startGame() {
-        GameState state = stateManager.getState();// Do nothing
+        GameState state = stateManager.getState();
         if (state == PREPARED || state == GAME_OVER) {
             newGame();
             gameLoop.start();
@@ -283,7 +335,6 @@ public class GameManager implements InputHandler {
     }
 
     private void pauseGame() {
-        //  gameLoop.stop();
         stateManager.setState(PAUSED);
     }
 
@@ -291,10 +342,6 @@ public class GameManager implements InputHandler {
         resetAccumulator();
         gameLoop.resume();
         stateManager.setState(PLAYING);
-    }
-
-    private void resetAccumulator() {
-        gravityAccumulator = 0;
     }
 
     private void setGameOver() {
@@ -306,39 +353,25 @@ public class GameManager implements InputHandler {
         gameExit.run();
     }
 
+    // =========================================================================
+    // PRIVATE METHODS: 6. RENDERING & SNAPSHOT HELPERS
+    // =========================================================================
+
+    private void render() {
+        tetrisCanvas.render(createGameSnapshot());
+    }
+
     private GameSnapshot createGameSnapshot() {
         final var wasDirty = isDirty.getAndSet(false);
         Tetromino current = getCurrentTetromino();
         return new GameSnapshot(getBoardView(), Optional.ofNullable(current), wasDirty, current == null ? 0 : gameBoard.calculateDropDistance(), current == null ? GhostType.NONE : ghostType);
     }
 
-    private boolean trySpawnNewTetromino() {
-        final var piece = generator.getNextPiece();
-        if (trySpawnMino(piece)) {
-            spawnObservable.notify(generator.peekNext());
-            return true;
-        }
-        return false;
+    private BoardView getBoardView() {
+        return gameBoard.getBoardView();
     }
 
-    private void lockClearAndScorePiece() {
-        isHoldLock = false;
-        gameBoard.lockTetrominoInPlace();
-        gameBoard.clearLines();
-        final var lastAction = gameBoard.getLastAction();
-        final LockPieceEvent lockEvent = createLockEvent(lastAction.tSpin(), lastAction.linesCleared());
-        scoreMessenger.notifyObservers(lockEvent);
-        spawnMinoOrGameOver();
-        gravityAccumulator = 0;
-    }
-
-    private boolean spawnMinoOrGameOver() {
-        if (trySpawnNewTetromino()) return true;
-        setGameOver();
-        return false;
-    }
-
-    private LockPieceEvent createLockEvent(final TSpin tSpin, int clearedLines) {
-        return new LockPieceEvent(clearedLines, tSpin);
+    private Tetromino getCurrentTetromino() {
+        return gameBoard.getCurrentTetromino();
     }
 }
